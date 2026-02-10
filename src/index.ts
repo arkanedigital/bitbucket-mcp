@@ -16,6 +16,7 @@ import path from "path";
 import fs from "fs";
 import { randomUUID } from "node:crypto";
 import { createServer as createHttpServer } from "node:http";
+import { AsyncLocalStorage } from "node:async_hooks";
 import {
   BitbucketPaginator,
   BITBUCKET_ALL_ITEMS_CAP,
@@ -578,9 +579,39 @@ interface BitbucketPipelineCommand {
 // =========== MCP SERVER ===========
 class BitbucketServer {
   private readonly server: Server;
-  private readonly api: AxiosInstance;
+  private readonly _defaultApi: AxiosInstance;
   private readonly config: BitbucketConfig;
-  private readonly paginator: BitbucketPaginator;
+  private readonly _defaultPaginator: BitbucketPaginator;
+  private readonly sessionApis = new Map<
+    string,
+    { api: AxiosInstance; paginator: BitbucketPaginator; token: string }
+  >();
+  private readonly sessionContext = new AsyncLocalStorage<string>();
+
+  /**
+   * Returns the API instance for the current session (if any), or the default.
+   */
+  private get api(): AxiosInstance {
+    const sessionId = this.sessionContext.getStore();
+    if (sessionId) {
+      const entry = this.sessionApis.get(sessionId);
+      if (entry) return entry.api;
+    }
+    return this._defaultApi;
+  }
+
+  /**
+   * Returns the paginator for the current session (if any), or the default.
+   */
+  private get paginator(): BitbucketPaginator {
+    const sessionId = this.sessionContext.getStore();
+    if (sessionId) {
+      const entry = this.sessionApis.get(sessionId);
+      if (entry) return entry.paginator;
+    }
+    return this._defaultPaginator;
+  }
+
   private readonly dangerousToolNames = new Set<string>([
     "deletePullRequestComment",
     "deletePullRequestTask",
@@ -651,9 +682,16 @@ class BitbucketServer {
     }
 
     if (!this.config.token && !(this.config.username && this.config.password)) {
-      throw new Error(
-        "Either BITBUCKET_TOKEN or BITBUCKET_USERNAME/PASSWORD is required"
-      );
+      const mode = process.env.TRANSPORT_MODE?.toLowerCase() || "stdio";
+      if (mode === "http") {
+        logger.warn(
+          "No Bitbucket credentials configured. Per-session OAuth tokens will be required for API calls."
+        );
+      } else {
+        throw new Error(
+          "Either BITBUCKET_TOKEN or BITBUCKET_USERNAME/PASSWORD is required"
+        );
+      }
     }
 
     // Setup Axios instance
@@ -661,7 +699,7 @@ class BitbucketServer {
     if (this.config.token) {
       headers.Authorization = `Bearer ${this.config.token}`;
     }
-    this.api = axios.create({
+    this._defaultApi = axios.create({
       baseURL: this.config.baseUrl,
       headers,
       auth:
@@ -670,7 +708,7 @@ class BitbucketServer {
           : undefined,
     });
 
-    this.paginator = new BitbucketPaginator(this.api, logger);
+    this._defaultPaginator = new BitbucketPaginator(this._defaultApi, logger);
 
     // Setup tool handlers using the request handler pattern
     this.setupToolHandlers(this.server);
@@ -698,6 +736,22 @@ class BitbucketServer {
     this.setupToolHandlers(server);
     server.onerror = (error) => logger.error("[MCP Error]", error);
     return server;
+  }
+
+  /**
+   * Creates a per-session API instance using the given OAuth bearer token.
+   */
+  private createSessionApi(token: string): {
+    api: AxiosInstance;
+    paginator: BitbucketPaginator;
+    token: string;
+  } {
+    const api = axios.create({
+      baseURL: this.config.baseUrl,
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const paginator = new BitbucketPaginator(api, logger);
+    return { api, paginator, token };
   }
 
   private setupToolHandlers(server: Server) {
@@ -2501,7 +2555,8 @@ class BitbucketServer {
     }));
 
     // Register the call tool handler
-    server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+      const executeToolCall = async () => {
       try {
         logger.info(`Called tool: ${request.params.name}`, {
           arguments: request.params.arguments,
@@ -3092,6 +3147,13 @@ class BitbucketServer {
         }
         throw error;
       }
+      };
+
+      // Run within session context so this.api/this.paginator resolve to per-session instances
+      if (extra.sessionId) {
+        return this.sessionContext.run(extra.sessionId, executeToolCall);
+      }
+      return executeToolCall();
     });
   }
 
@@ -6764,8 +6826,13 @@ class BitbucketServer {
     // Bearer token auth middleware (if MCP_AUTH_TOKEN is configured)
     if (authToken) {
       app.use((req, res, next) => {
-        // Skip auth for health check
-        if (req.path === "/health") return next();
+        // Skip auth for health check and OAuth discovery endpoints
+        if (
+          req.path === "/health" ||
+          req.path.startsWith("/.well-known/")
+        ) {
+          return next();
+        }
 
         const authHeader = req.headers.authorization;
         if (!authHeader || !authHeader.startsWith("Bearer ")) {
@@ -6782,6 +6849,33 @@ class BitbucketServer {
       logger.info("Bearer token authentication enabled");
     }
 
+    // OAuth Authorization Server Metadata (RFC 8414)
+    // Allows MCP clients to discover Bitbucket's OAuth endpoints for token acquisition
+    app.get("/.well-known/oauth-authorization-server", (_req, res) => {
+      res.json({
+        issuer: "https://bitbucket.org",
+        authorization_endpoint:
+          "https://bitbucket.org/site/oauth2/authorize",
+        token_endpoint:
+          "https://bitbucket.org/site/oauth2/access_token",
+        response_types_supported: ["code"],
+        grant_types_supported: ["authorization_code", "refresh_token"],
+        code_challenge_methods_supported: ["S256"],
+      });
+    });
+
+    // OAuth Protected Resource Metadata (RFC 9728)
+    // Points clients to the authorization server for this resource
+    app.get("/.well-known/oauth-protected-resource", (req, res) => {
+      const proto = req.headers["x-forwarded-proto"] || req.protocol;
+      const hostHeader = req.headers["x-forwarded-host"] || req.get("host");
+      const baseUrl = `${proto}://${hostHeader}`;
+      res.json({
+        resource: baseUrl,
+        authorization_servers: ["https://bitbucket.org"],
+      });
+    });
+
     // Map to hold per-session transport+server pairs
     const sessions = new Map<
       string,
@@ -6791,22 +6885,53 @@ class BitbucketServer {
     app.all("/mcp", async (req, res) => {
       const sessionId = req.headers["mcp-session-id"] as string | undefined;
 
+      // Extract bearer token from request (may be an OAuth Bitbucket token)
+      const bearerToken = req.headers.authorization?.startsWith("Bearer ")
+        ? req.headers.authorization.slice(7)
+        : undefined;
+      // If the bearer token is NOT the static MCP_AUTH_TOKEN, treat it as a Bitbucket OAuth token
+      const isOAuthToken = bearerToken && bearerToken !== authToken;
+
       if (sessionId && sessions.has(sessionId)) {
-        // Existing session
+        // Existing session — update per-session API if token changed (e.g. token refresh)
+        if (isOAuthToken) {
+          const existing = this.sessionApis.get(sessionId);
+          if (!existing || existing.token !== bearerToken) {
+            this.sessionApis.set(
+              sessionId,
+              this.createSessionApi(bearerToken)
+            );
+          }
+        }
         const session = sessions.get(sessionId)!;
         await session.transport.handleRequest(req, res, req.body);
       } else if (!sessionId && req.method === "POST") {
         // New session — create transport and server
+        const capturedOAuthToken = isOAuthToken ? bearerToken : undefined;
+
         const transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
           onsessioninitialized: (id) => {
             sessions.set(id, { transport, server: mcpServer });
+            // Register per-session API if client provided an OAuth token
+            if (capturedOAuthToken) {
+              this.sessionApis.set(
+                id,
+                this.createSessionApi(capturedOAuthToken)
+              );
+              logger.info(
+                `Session ${id} using client-provided OAuth token for Bitbucket API`
+              );
+            }
           },
         });
 
         transport.onclose = () => {
           const sid = transport.sessionId;
-          if (sid) sessions.delete(sid);
+          if (sid) {
+            sessions.delete(sid);
+            this.sessionApis.delete(sid);
+          }
         };
 
         const mcpServer = this.createMcpServer();
