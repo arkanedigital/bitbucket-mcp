@@ -6756,9 +6756,31 @@ class BitbucketServer {
   private async runHttp() {
     const port = parseInt(process.env.PORT || "3000", 10);
     const host = process.env.HOST || "127.0.0.1";
+    const authToken = process.env.MCP_AUTH_TOKEN;
 
     const app = express();
     app.use(express.json());
+
+    // Bearer token auth middleware (if MCP_AUTH_TOKEN is configured)
+    if (authToken) {
+      app.use((req, res, next) => {
+        // Skip auth for health check
+        if (req.path === "/health") return next();
+
+        const authHeader = req.headers.authorization;
+        if (!authHeader || !authHeader.startsWith("Bearer ")) {
+          res.status(401).json({ error: "Unauthorized: Bearer token required" });
+          return;
+        }
+        const token = authHeader.slice(7);
+        if (token !== authToken) {
+          res.status(401).json({ error: "Unauthorized: Invalid token" });
+          return;
+        }
+        next();
+      });
+      logger.info("Bearer token authentication enabled");
+    }
 
     // Map to hold per-session transport+server pairs
     const sessions = new Map<
