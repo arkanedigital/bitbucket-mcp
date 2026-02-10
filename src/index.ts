@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import {
   CallToolRequestSchema,
   ErrorCode,
@@ -8,10 +9,13 @@ import {
   McpError,
 } from "@modelcontextprotocol/sdk/types.js";
 import axios, { AxiosInstance, AxiosError } from "axios";
+import express from "express";
 import winston from "winston";
 import os from "os";
 import path from "path";
 import fs from "fs";
+import { randomUUID } from "node:crypto";
+import { createServer as createHttpServer } from "node:http";
 import {
   BitbucketPaginator,
   BITBUCKET_ALL_ITEMS_CAP,
@@ -564,15 +568,36 @@ class BitbucketServer {
     this.paginator = new BitbucketPaginator(this.api, logger);
 
     // Setup tool handlers using the request handler pattern
-    this.setupToolHandlers();
+    this.setupToolHandlers(this.server);
 
     // Add error handler - CRITICAL for stability
     this.server.onerror = (error) => logger.error("[MCP Error]", error);
   }
 
-  private setupToolHandlers() {
+  /**
+   * Creates a new MCP Server instance with all tool handlers registered.
+   * Used for per-session servers in HTTP transport mode.
+   */
+  private createMcpServer(): Server {
+    const server = new Server(
+      {
+        name: "bitbucket-mcp-server",
+        version: "1.0.0",
+      },
+      {
+        capabilities: {
+          tools: {},
+        },
+      }
+    );
+    this.setupToolHandlers(server);
+    server.onerror = (error) => logger.error("[MCP Error]", error);
+    return server;
+  }
+
+  private setupToolHandlers(server: Server) {
     // Register the list tools handler
-    this.server.setRequestHandler(ListToolsRequestSchema, async () => ({
+    server.setRequestHandler(ListToolsRequestSchema, async () => ({
       tools: [
         {
           name: "listRepositories",
@@ -1862,7 +1887,7 @@ class BitbucketServer {
     }));
 
     // Register the call tool handler
-    this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    server.setRequestHandler(CallToolRequestSchema, async (request) => {
       try {
         logger.info(`Called tool: ${request.params.name}`, {
           arguments: request.params.arguments,
@@ -4897,9 +4922,70 @@ class BitbucketServer {
   }
 
   async run() {
-    const transport = new StdioServerTransport();
-    await this.server.connect(transport);
-    logger.info("Bitbucket MCP server running on stdio");
+    const mode = process.env.TRANSPORT_MODE?.toLowerCase() || "stdio";
+
+    if (mode === "http") {
+      await this.runHttp();
+    } else {
+      const transport = new StdioServerTransport();
+      await this.server.connect(transport);
+      logger.info("Bitbucket MCP server running on stdio");
+    }
+  }
+
+  private async runHttp() {
+    const port = parseInt(process.env.PORT || "3000", 10);
+    const host = process.env.HOST || "127.0.0.1";
+
+    const app = express();
+    app.use(express.json());
+
+    // Map to hold per-session transport+server pairs
+    const sessions = new Map<
+      string,
+      { transport: StreamableHTTPServerTransport; server: Server }
+    >();
+
+    app.all("/mcp", async (req, res) => {
+      const sessionId = req.headers["mcp-session-id"] as string | undefined;
+
+      if (sessionId && sessions.has(sessionId)) {
+        // Existing session
+        const session = sessions.get(sessionId)!;
+        await session.transport.handleRequest(req, res, req.body);
+      } else if (!sessionId && req.method === "POST") {
+        // New session — create transport and server
+        const transport = new StreamableHTTPServerTransport({
+          sessionIdGenerator: () => randomUUID(),
+          onsessioninitialized: (id) => {
+            sessions.set(id, { transport, server: mcpServer });
+          },
+        });
+
+        transport.onclose = () => {
+          const sid = transport.sessionId;
+          if (sid) sessions.delete(sid);
+        };
+
+        const mcpServer = this.createMcpServer();
+        await mcpServer.connect(transport);
+        await transport.handleRequest(req, res, req.body);
+      } else {
+        res.status(400).json({ error: "Bad Request: No valid session" });
+      }
+    });
+
+    // Health check endpoint
+    app.get("/health", (_req, res) => {
+      res.json({ status: "ok" });
+    });
+
+    const httpServer = createHttpServer(app);
+    httpServer.listen(port, host, () => {
+      logger.info(
+        `Bitbucket MCP server running on http://${host}:${port}/mcp`
+      );
+    });
   }
 }
 

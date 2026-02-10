@@ -32,7 +32,8 @@ RUN chmod +x ./dist/index.js
 
 # Environment variables
 ENV NODE_ENV=production
-
+ENV TRANSPORT_MODE=http
+ENV HOST=0.0.0.0
 ENV PORT=3000
 
 # Expose port
