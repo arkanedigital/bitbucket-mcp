@@ -522,6 +522,7 @@ class BitbucketServer {
     "deletePullRequestTask",
     "deleteBranch",
     "deleteFile",
+    "deleteTag",
   ]);
   private isDangerousTool(name: string): boolean {
     // Explicitly dangerous or conservative prefix match (delete*)
@@ -2155,6 +2156,94 @@ class BitbucketServer {
             required: ["repo_slug", "path", "message", "branch"],
           },
         },
+        // ===== Tag Operations =====
+        {
+          name: "listTags",
+          description: "List tags for a repository",
+          inputSchema: {
+            type: "object",
+            properties: {
+              workspace: {
+                type: "string",
+                description: "Bitbucket workspace name",
+              },
+              repo_slug: { type: "string", description: "Repository slug" },
+              q: {
+                type: "string",
+                description:
+                  'Optional query filter (e.g., name ~ "v1")',
+              },
+              sort: {
+                type: "string",
+                description:
+                  'Optional sort field (e.g., "-target.date" for newest first)',
+              },
+              ...PAGINATION_BASE_SCHEMA,
+              all: PAGINATION_ALL_SCHEMA,
+            },
+            required: ["repo_slug"],
+          },
+        },
+        {
+          name: "getTag",
+          description: "Get details for a specific tag",
+          inputSchema: {
+            type: "object",
+            properties: {
+              workspace: {
+                type: "string",
+                description: "Bitbucket workspace name",
+              },
+              repo_slug: { type: "string", description: "Repository slug" },
+              name: { type: "string", description: "Tag name" },
+            },
+            required: ["repo_slug", "name"],
+          },
+        },
+        {
+          name: "createTag",
+          description: "Create a new tag in a repository",
+          inputSchema: {
+            type: "object",
+            properties: {
+              workspace: {
+                type: "string",
+                description: "Bitbucket workspace name",
+              },
+              repo_slug: { type: "string", description: "Repository slug" },
+              name: { type: "string", description: "Tag name" },
+              target: {
+                type: "object",
+                description: "The commit to tag",
+                properties: {
+                  hash: {
+                    type: "string",
+                    description: "Commit hash to tag",
+                  },
+                },
+                required: ["hash"],
+              },
+            },
+            required: ["repo_slug", "name", "target"],
+          },
+        },
+        {
+          name: "deleteTag",
+          description:
+            "Delete a tag from a repository (dangerous operation)",
+          inputSchema: {
+            type: "object",
+            properties: {
+              workspace: {
+                type: "string",
+                description: "Bitbucket workspace name",
+              },
+              repo_slug: { type: "string", description: "Repository slug" },
+              name: { type: "string", description: "Tag name to delete" },
+            },
+            required: ["repo_slug", "name"],
+          },
+        },
       ].filter(
         (tool) =>
           this.config.allowDangerousCommands === true ||
@@ -2636,6 +2725,36 @@ class BitbucketServer {
               args.path as string,
               args.message as string,
               args.branch as string
+            );
+          // ===== Tag Operations =====
+          case "listTags":
+            return await this.listTags(
+              args.workspace as string,
+              args.repo_slug as string,
+              args.q as string,
+              args.sort as string,
+              args.pagelen as number,
+              args.page as number,
+              args.all as boolean
+            );
+          case "getTag":
+            return await this.getTag(
+              args.workspace as string,
+              args.repo_slug as string,
+              args.name as string
+            );
+          case "createTag":
+            return await this.createTag(
+              args.workspace as string,
+              args.repo_slug as string,
+              args.name as string,
+              args.target as { hash: string }
+            );
+          case "deleteTag":
+            return await this.deleteTag(
+              args.workspace as string,
+              args.repo_slug as string,
+              args.name as string
             );
           default:
             throw new McpError(
@@ -5738,6 +5857,169 @@ class BitbucketServer {
       throw new McpError(
         ErrorCode.InternalError,
         `Failed to delete file: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+  }
+
+  // ===== Tag Operations =====
+
+  async listTags(
+    workspace: string,
+    repo_slug: string,
+    q?: string,
+    sort?: string,
+    pagelen?: number,
+    page?: number,
+    all?: boolean
+  ) {
+    try {
+      const wsName = workspace || this.config.defaultWorkspace;
+      if (!wsName) {
+        throw new McpError(
+          ErrorCode.InvalidParams,
+          "Workspace must be provided either as a parameter or through BITBUCKET_WORKSPACE environment variable"
+        );
+      }
+      logger.info("Listing tags", { workspace: wsName, repo_slug, q, sort });
+
+      const params: Record<string, string> = {};
+      if (q) params.q = q;
+      if (sort) params.sort = sort;
+
+      const result = await this.paginator.fetchValues<BitbucketBranchDetail>(
+        `/repositories/${wsName}/${repo_slug}/refs/tags`,
+        { pagelen, page, all, params, description: "listTags" }
+      );
+
+      return {
+        content: [
+          { type: "text", text: JSON.stringify(result.values, null, 2) },
+        ],
+      };
+    } catch (error) {
+      logger.error("Error listing tags", { error, workspace, repo_slug });
+      throw new McpError(
+        ErrorCode.InternalError,
+        `Failed to list tags: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+  }
+
+  async getTag(workspace: string, repo_slug: string, name: string) {
+    try {
+      const wsName = workspace || this.config.defaultWorkspace;
+      if (!wsName) {
+        throw new McpError(
+          ErrorCode.InvalidParams,
+          "Workspace must be provided either as a parameter or through BITBUCKET_WORKSPACE environment variable"
+        );
+      }
+      logger.info("Getting tag", { workspace: wsName, repo_slug, name });
+
+      const response = await this.api.get(
+        `/repositories/${wsName}/${repo_slug}/refs/tags/${encodeURIComponent(name)}`
+      );
+
+      return {
+        content: [
+          { type: "text", text: JSON.stringify(response.data, null, 2) },
+        ],
+      };
+    } catch (error) {
+      logger.error("Error getting tag", {
+        error,
+        workspace,
+        repo_slug,
+        name,
+      });
+      throw new McpError(
+        ErrorCode.InternalError,
+        `Failed to get tag: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+  }
+
+  async createTag(
+    workspace: string,
+    repo_slug: string,
+    name: string,
+    target: { hash: string }
+  ) {
+    try {
+      const wsName = workspace || this.config.defaultWorkspace;
+      if (!wsName) {
+        throw new McpError(
+          ErrorCode.InvalidParams,
+          "Workspace must be provided either as a parameter or through BITBUCKET_WORKSPACE environment variable"
+        );
+      }
+      logger.info("Creating tag", {
+        workspace: wsName,
+        repo_slug,
+        name,
+        target,
+      });
+
+      const response = await this.api.post(
+        `/repositories/${wsName}/${repo_slug}/refs/tags`,
+        { name, target }
+      );
+
+      return {
+        content: [
+          { type: "text", text: JSON.stringify(response.data, null, 2) },
+        ],
+      };
+    } catch (error) {
+      logger.error("Error creating tag", {
+        error,
+        workspace,
+        repo_slug,
+        name,
+      });
+      throw new McpError(
+        ErrorCode.InternalError,
+        `Failed to create tag: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+  }
+
+  async deleteTag(workspace: string, repo_slug: string, name: string) {
+    try {
+      const wsName = workspace || this.config.defaultWorkspace;
+      if (!wsName) {
+        throw new McpError(
+          ErrorCode.InvalidParams,
+          "Workspace must be provided either as a parameter or through BITBUCKET_WORKSPACE environment variable"
+        );
+      }
+      logger.info("Deleting tag", { workspace: wsName, repo_slug, name });
+
+      await this.api.delete(
+        `/repositories/${wsName}/${repo_slug}/refs/tags/${encodeURIComponent(name)}`
+      );
+
+      return {
+        content: [{ type: "text", text: "Tag deleted successfully." }],
+      };
+    } catch (error) {
+      logger.error("Error deleting tag", {
+        error,
+        workspace,
+        repo_slug,
+        name,
+      });
+      throw new McpError(
+        ErrorCode.InternalError,
+        `Failed to delete tag: ${
           error instanceof Error ? error.message : String(error)
         }`
       );
