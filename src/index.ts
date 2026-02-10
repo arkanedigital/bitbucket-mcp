@@ -186,6 +186,28 @@ interface BitbucketBranch {
 }
 
 /**
+ * Represents a detailed Bitbucket branch with commit target
+ */
+interface BitbucketBranchDetail {
+  name: string;
+  type: "branch" | "tag";
+  target: {
+    hash: string;
+    type: "commit";
+    date: string;
+    author: {
+      raw: string;
+      user?: BitbucketAccount;
+    };
+    message: string;
+    parents?: Array<{ hash: string; type: "commit" }>;
+  };
+  merge_strategies?: string[];
+  default_merge_strategy?: string;
+  links: Record<string, BitbucketLink[]>;
+}
+
+/**
  * Represents a hyperlink in Bitbucket API responses
  */
 interface BitbucketLink {
@@ -482,6 +504,7 @@ class BitbucketServer {
   private readonly dangerousToolNames = new Set<string>([
     "deletePullRequestComment",
     "deletePullRequestTask",
+    "deleteBranch",
   ]);
   private isDangerousTool(name: string): boolean {
     // Explicitly dangerous or conservative prefix match (delete*)
@@ -1879,6 +1902,95 @@ class BitbucketServer {
             required: ["workspace", "repo_slug"],
           },
         },
+        // ===== Branch Operations =====
+        {
+          name: "listBranches",
+          description: "List branches for a repository",
+          inputSchema: {
+            type: "object",
+            properties: {
+              workspace: {
+                type: "string",
+                description: "Bitbucket workspace name",
+              },
+              repo_slug: { type: "string", description: "Repository slug" },
+              q: {
+                type: "string",
+                description:
+                  'Optional query filter (e.g., name ~ "feature")',
+              },
+              sort: {
+                type: "string",
+                description:
+                  'Optional sort field (e.g., "-target.date" for newest first)',
+              },
+              ...PAGINATION_BASE_SCHEMA,
+              all: PAGINATION_ALL_SCHEMA,
+            },
+            required: ["repo_slug"],
+          },
+        },
+        {
+          name: "getBranch",
+          description: "Get details for a specific branch",
+          inputSchema: {
+            type: "object",
+            properties: {
+              workspace: {
+                type: "string",
+                description: "Bitbucket workspace name",
+              },
+              repo_slug: { type: "string", description: "Repository slug" },
+              name: { type: "string", description: "Branch name" },
+            },
+            required: ["repo_slug", "name"],
+          },
+        },
+        {
+          name: "createBranch",
+          description: "Create a new branch in a repository",
+          inputSchema: {
+            type: "object",
+            properties: {
+              workspace: {
+                type: "string",
+                description: "Bitbucket workspace name",
+              },
+              repo_slug: { type: "string", description: "Repository slug" },
+              name: { type: "string", description: "New branch name" },
+              target: {
+                type: "object",
+                description: "The target to branch from",
+                properties: {
+                  hash: {
+                    type: "string",
+                    description:
+                      "Commit hash or branch name to branch from",
+                  },
+                },
+                required: ["hash"],
+              },
+            },
+            required: ["repo_slug", "name", "target"],
+          },
+        },
+        {
+          name: "deleteBranch",
+          description:
+            "Delete a branch from a repository (dangerous operation)",
+          inputSchema: {
+            type: "object",
+            properties: {
+              workspace: {
+                type: "string",
+                description: "Bitbucket workspace name",
+              },
+              repo_slug: { type: "string", description: "Repository slug" },
+              name: { type: "string", description: "Branch name to delete" },
+            },
+            required: ["repo_slug", "name"],
+          },
+        },
       ].filter(
         (tool) =>
           this.config.allowDangerousCommands === true ||
@@ -2284,6 +2396,36 @@ class BitbucketServer {
             return await this.getEffectiveDefaultReviewers(
               args.workspace as string,
               args.repo_slug as string
+            );
+          // ===== Branch Operations =====
+          case "listBranches":
+            return await this.listBranches(
+              args.workspace as string,
+              args.repo_slug as string,
+              args.q as string,
+              args.sort as string,
+              args.pagelen as number,
+              args.page as number,
+              args.all as boolean
+            );
+          case "getBranch":
+            return await this.getBranch(
+              args.workspace as string,
+              args.repo_slug as string,
+              args.name as string
+            );
+          case "createBranch":
+            return await this.createBranch(
+              args.workspace as string,
+              args.repo_slug as string,
+              args.name as string,
+              args.target as { hash: string }
+            );
+          case "deleteBranch":
+            return await this.deleteBranch(
+              args.workspace as string,
+              args.repo_slug as string,
+              args.name as string
             );
           default:
             throw new McpError(
@@ -4915,6 +5057,174 @@ class BitbucketServer {
       throw new McpError(
         ErrorCode.InternalError,
         `Failed to get pull request statuses: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+  }
+
+  // ===== Branch Operations =====
+
+  async listBranches(
+    workspace: string,
+    repo_slug: string,
+    q?: string,
+    sort?: string,
+    pagelen?: number,
+    page?: number,
+    all?: boolean
+  ) {
+    try {
+      const wsName = workspace || this.config.defaultWorkspace;
+      if (!wsName) {
+        throw new McpError(
+          ErrorCode.InvalidParams,
+          "Workspace must be provided either as a parameter or through BITBUCKET_WORKSPACE environment variable"
+        );
+      }
+      logger.info("Listing branches", {
+        workspace: wsName,
+        repo_slug,
+        q,
+        sort,
+      });
+
+      const params: Record<string, string> = {};
+      if (q) params.q = q;
+      if (sort) params.sort = sort;
+
+      const result = await this.paginator.fetchValues<BitbucketBranchDetail>(
+        `/repositories/${wsName}/${repo_slug}/refs/branches`,
+        { pagelen, page, all, params, description: "listBranches" }
+      );
+
+      return {
+        content: [
+          { type: "text", text: JSON.stringify(result.values, null, 2) },
+        ],
+      };
+    } catch (error) {
+      logger.error("Error listing branches", { error, workspace, repo_slug });
+      throw new McpError(
+        ErrorCode.InternalError,
+        `Failed to list branches: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+  }
+
+  async getBranch(workspace: string, repo_slug: string, name: string) {
+    try {
+      const wsName = workspace || this.config.defaultWorkspace;
+      if (!wsName) {
+        throw new McpError(
+          ErrorCode.InvalidParams,
+          "Workspace must be provided either as a parameter or through BITBUCKET_WORKSPACE environment variable"
+        );
+      }
+      logger.info("Getting branch", { workspace: wsName, repo_slug, name });
+
+      const response = await this.api.get(
+        `/repositories/${wsName}/${repo_slug}/refs/branches/${encodeURIComponent(name)}`
+      );
+
+      return {
+        content: [
+          { type: "text", text: JSON.stringify(response.data, null, 2) },
+        ],
+      };
+    } catch (error) {
+      logger.error("Error getting branch", {
+        error,
+        workspace,
+        repo_slug,
+        name,
+      });
+      throw new McpError(
+        ErrorCode.InternalError,
+        `Failed to get branch: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+  }
+
+  async createBranch(
+    workspace: string,
+    repo_slug: string,
+    name: string,
+    target: { hash: string }
+  ) {
+    try {
+      const wsName = workspace || this.config.defaultWorkspace;
+      if (!wsName) {
+        throw new McpError(
+          ErrorCode.InvalidParams,
+          "Workspace must be provided either as a parameter or through BITBUCKET_WORKSPACE environment variable"
+        );
+      }
+      logger.info("Creating branch", {
+        workspace: wsName,
+        repo_slug,
+        name,
+        target,
+      });
+
+      const response = await this.api.post(
+        `/repositories/${wsName}/${repo_slug}/refs/branches`,
+        { name, target }
+      );
+
+      return {
+        content: [
+          { type: "text", text: JSON.stringify(response.data, null, 2) },
+        ],
+      };
+    } catch (error) {
+      logger.error("Error creating branch", {
+        error,
+        workspace,
+        repo_slug,
+        name,
+      });
+      throw new McpError(
+        ErrorCode.InternalError,
+        `Failed to create branch: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+  }
+
+  async deleteBranch(workspace: string, repo_slug: string, name: string) {
+    try {
+      const wsName = workspace || this.config.defaultWorkspace;
+      if (!wsName) {
+        throw new McpError(
+          ErrorCode.InvalidParams,
+          "Workspace must be provided either as a parameter or through BITBUCKET_WORKSPACE environment variable"
+        );
+      }
+      logger.info("Deleting branch", { workspace: wsName, repo_slug, name });
+
+      await this.api.delete(
+        `/repositories/${wsName}/${repo_slug}/refs/branches/${encodeURIComponent(name)}`
+      );
+
+      return {
+        content: [{ type: "text", text: "Branch deleted successfully." }],
+      };
+    } catch (error) {
+      logger.error("Error deleting branch", {
+        error,
+        workspace,
+        repo_slug,
+        name,
+      });
+      throw new McpError(
+        ErrorCode.InternalError,
+        `Failed to delete branch: ${
           error instanceof Error ? error.message : String(error)
         }`
       );
