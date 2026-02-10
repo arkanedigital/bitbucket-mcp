@@ -208,6 +208,22 @@ interface BitbucketBranchDetail {
 }
 
 /**
+ * Represents an entry in a Bitbucket source directory listing
+ */
+interface BitbucketSourceEntry {
+  path: string;
+  type: "commit_directory" | "commit_file";
+  size?: number;
+  commit?: {
+    hash: string;
+    type: "commit";
+    date?: string;
+  };
+  attributes?: string[];
+  links: Record<string, BitbucketLink[]>;
+}
+
+/**
  * Represents a hyperlink in Bitbucket API responses
  */
 interface BitbucketLink {
@@ -505,6 +521,7 @@ class BitbucketServer {
     "deletePullRequestComment",
     "deletePullRequestTask",
     "deleteBranch",
+    "deleteFile",
   ]);
   private isDangerousTool(name: string): boolean {
     // Explicitly dangerous or conservative prefix match (delete*)
@@ -1991,6 +2008,153 @@ class BitbucketServer {
             required: ["repo_slug", "name"],
           },
         },
+        // ===== File & Directory Operations =====
+        {
+          name: "getFileContent",
+          description:
+            "Get the content of a file from a repository at a specific ref (branch, tag, or commit)",
+          inputSchema: {
+            type: "object",
+            properties: {
+              workspace: {
+                type: "string",
+                description: "Bitbucket workspace name",
+              },
+              repo_slug: { type: "string", description: "Repository slug" },
+              path: {
+                type: "string",
+                description: "File path within the repository",
+              },
+              ref: {
+                type: "string",
+                description:
+                  "Branch name, tag, or commit hash (defaults to main branch)",
+              },
+            },
+            required: ["repo_slug", "path"],
+          },
+        },
+        {
+          name: "listDirectory",
+          description:
+            "List contents of a directory in a repository at a specific ref",
+          inputSchema: {
+            type: "object",
+            properties: {
+              workspace: {
+                type: "string",
+                description: "Bitbucket workspace name",
+              },
+              repo_slug: { type: "string", description: "Repository slug" },
+              path: {
+                type: "string",
+                description:
+                  "Directory path (empty string or '/' for root)",
+              },
+              ref: {
+                type: "string",
+                description:
+                  "Branch name, tag, or commit hash (defaults to main branch)",
+              },
+              max_depth: {
+                type: "number",
+                description:
+                  "Maximum depth of directory listing (default 1)",
+              },
+              ...PAGINATION_BASE_SCHEMA,
+              all: PAGINATION_ALL_SCHEMA,
+            },
+            required: ["repo_slug"],
+          },
+        },
+        {
+          name: "writeFile",
+          description:
+            "Create or update a file in a repository by committing it to a branch",
+          inputSchema: {
+            type: "object",
+            properties: {
+              workspace: {
+                type: "string",
+                description: "Bitbucket workspace name",
+              },
+              repo_slug: { type: "string", description: "Repository slug" },
+              path: {
+                type: "string",
+                description: "File path within the repository",
+              },
+              content: { type: "string", description: "File content" },
+              message: { type: "string", description: "Commit message" },
+              branch: { type: "string", description: "Branch to commit to" },
+              sourceCommit: {
+                type: "string",
+                description:
+                  "Optional parent commit hash to prevent clobbering concurrent changes",
+              },
+            },
+            required: ["repo_slug", "path", "content", "message", "branch"],
+          },
+        },
+        {
+          name: "writeFiles",
+          description:
+            "Create or update multiple files in a single commit to a branch",
+          inputSchema: {
+            type: "object",
+            properties: {
+              workspace: {
+                type: "string",
+                description: "Bitbucket workspace name",
+              },
+              repo_slug: { type: "string", description: "Repository slug" },
+              files: {
+                type: "array",
+                description: "Array of files to write",
+                items: {
+                  type: "object",
+                  properties: {
+                    path: {
+                      type: "string",
+                      description: "File path within the repository",
+                    },
+                    content: {
+                      type: "string",
+                      description: "File content",
+                    },
+                  },
+                  required: ["path", "content"],
+                },
+              },
+              message: { type: "string", description: "Commit message" },
+              branch: { type: "string", description: "Branch to commit to" },
+              sourceCommit: {
+                type: "string",
+                description:
+                  "Optional parent commit hash to prevent clobbering concurrent changes",
+              },
+            },
+            required: ["repo_slug", "files", "message", "branch"],
+          },
+        },
+        {
+          name: "deleteFile",
+          description:
+            "Delete a file from a repository by committing the deletion to a branch (dangerous operation)",
+          inputSchema: {
+            type: "object",
+            properties: {
+              workspace: {
+                type: "string",
+                description: "Bitbucket workspace name",
+              },
+              repo_slug: { type: "string", description: "Repository slug" },
+              path: { type: "string", description: "File path to delete" },
+              message: { type: "string", description: "Commit message" },
+              branch: { type: "string", description: "Branch to commit to" },
+            },
+            required: ["repo_slug", "path", "message", "branch"],
+          },
+        },
       ].filter(
         (tool) =>
           this.config.allowDangerousCommands === true ||
@@ -2426,6 +2590,52 @@ class BitbucketServer {
               args.workspace as string,
               args.repo_slug as string,
               args.name as string
+            );
+          // ===== File & Directory Operations =====
+          case "getFileContent":
+            return await this.getFileContent(
+              args.workspace as string,
+              args.repo_slug as string,
+              args.path as string,
+              args.ref as string
+            );
+          case "listDirectory":
+            return await this.listDirectory(
+              args.workspace as string,
+              args.repo_slug as string,
+              args.path as string,
+              args.ref as string,
+              args.max_depth as number,
+              args.pagelen as number,
+              args.page as number,
+              args.all as boolean
+            );
+          case "writeFile":
+            return await this.writeFile(
+              args.workspace as string,
+              args.repo_slug as string,
+              args.path as string,
+              args.content as string,
+              args.message as string,
+              args.branch as string,
+              args.sourceCommit as string
+            );
+          case "writeFiles":
+            return await this.writeFiles(
+              args.workspace as string,
+              args.repo_slug as string,
+              args.files as Array<{ path: string; content: string }>,
+              args.message as string,
+              args.branch as string,
+              args.sourceCommit as string
+            );
+          case "deleteFile":
+            return await this.deleteFile(
+              args.workspace as string,
+              args.repo_slug as string,
+              args.path as string,
+              args.message as string,
+              args.branch as string
             );
           default:
             throw new McpError(
@@ -5225,6 +5435,309 @@ class BitbucketServer {
       throw new McpError(
         ErrorCode.InternalError,
         `Failed to delete branch: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+  }
+
+  // ===== File & Directory Operations =====
+
+  async getFileContent(
+    workspace: string,
+    repo_slug: string,
+    filePath: string,
+    ref?: string
+  ) {
+    try {
+      const wsName = workspace || this.config.defaultWorkspace;
+      if (!wsName) {
+        throw new McpError(
+          ErrorCode.InvalidParams,
+          "Workspace must be provided either as a parameter or through BITBUCKET_WORKSPACE environment variable"
+        );
+      }
+      const commitRef = ref || "HEAD";
+      logger.info("Getting file content", {
+        workspace: wsName,
+        repo_slug,
+        path: filePath,
+        ref: commitRef,
+      });
+
+      const response = await this.api.get(
+        `/repositories/${wsName}/${repo_slug}/src/${encodeURIComponent(commitRef)}/${filePath}`,
+        {
+          responseType: "text",
+          transformResponse: [(data: string) => data],
+        }
+      );
+
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              typeof response.data === "string"
+                ? response.data
+                : JSON.stringify(response.data, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      logger.error("Error getting file content", {
+        error,
+        workspace,
+        repo_slug,
+        path: filePath,
+        ref,
+      });
+      throw new McpError(
+        ErrorCode.InternalError,
+        `Failed to get file content: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+  }
+
+  async listDirectory(
+    workspace: string,
+    repo_slug: string,
+    dirPath?: string,
+    ref?: string,
+    max_depth?: number,
+    pagelen?: number,
+    page?: number,
+    all?: boolean
+  ) {
+    try {
+      const wsName = workspace || this.config.defaultWorkspace;
+      if (!wsName) {
+        throw new McpError(
+          ErrorCode.InvalidParams,
+          "Workspace must be provided either as a parameter or through BITBUCKET_WORKSPACE environment variable"
+        );
+      }
+      const commitRef = ref || "HEAD";
+      const safePath = dirPath && dirPath !== "/" ? dirPath : "";
+      logger.info("Listing directory", {
+        workspace: wsName,
+        repo_slug,
+        path: safePath,
+        ref: commitRef,
+      });
+
+      const params: Record<string, number> = {};
+      if (max_depth !== undefined) params.max_depth = max_depth;
+
+      const urlPath = safePath
+        ? `/repositories/${wsName}/${repo_slug}/src/${encodeURIComponent(commitRef)}/${safePath}/`
+        : `/repositories/${wsName}/${repo_slug}/src/${encodeURIComponent(commitRef)}/`;
+
+      const result = await this.paginator.fetchValues<BitbucketSourceEntry>(
+        urlPath,
+        { pagelen, page, all, params, description: "listDirectory" }
+      );
+
+      return {
+        content: [
+          { type: "text", text: JSON.stringify(result.values, null, 2) },
+        ],
+      };
+    } catch (error) {
+      logger.error("Error listing directory", {
+        error,
+        workspace,
+        repo_slug,
+        path: dirPath,
+        ref,
+      });
+      throw new McpError(
+        ErrorCode.InternalError,
+        `Failed to list directory: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+  }
+
+  async writeFile(
+    workspace: string,
+    repo_slug: string,
+    filePath: string,
+    content: string,
+    message: string,
+    branch: string,
+    sourceCommit?: string
+  ) {
+    try {
+      const wsName = workspace || this.config.defaultWorkspace;
+      if (!wsName) {
+        throw new McpError(
+          ErrorCode.InvalidParams,
+          "Workspace must be provided either as a parameter or through BITBUCKET_WORKSPACE environment variable"
+        );
+      }
+      logger.info("Writing file", {
+        workspace: wsName,
+        repo_slug,
+        path: filePath,
+        branch,
+        message,
+      });
+
+      const form = new FormData();
+      form.append(filePath, new Blob([content]), filePath);
+      form.append("message", message);
+      form.append("branch", branch);
+      if (sourceCommit) {
+        form.append("parents", sourceCommit);
+      }
+
+      const response = await this.api.post(
+        `/repositories/${wsName}/${repo_slug}/src`,
+        form
+      );
+
+      const responseText = response.data
+        ? JSON.stringify(response.data, null, 2)
+        : `File "${filePath}" committed to branch "${branch}" successfully.`;
+
+      return {
+        content: [{ type: "text", text: responseText }],
+      };
+    } catch (error) {
+      logger.error("Error writing file", {
+        error,
+        workspace,
+        repo_slug,
+        path: filePath,
+        branch,
+      });
+      throw new McpError(
+        ErrorCode.InternalError,
+        `Failed to write file: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+  }
+
+  async writeFiles(
+    workspace: string,
+    repo_slug: string,
+    files: Array<{ path: string; content: string }>,
+    message: string,
+    branch: string,
+    sourceCommit?: string
+  ) {
+    try {
+      const wsName = workspace || this.config.defaultWorkspace;
+      if (!wsName) {
+        throw new McpError(
+          ErrorCode.InvalidParams,
+          "Workspace must be provided either as a parameter or through BITBUCKET_WORKSPACE environment variable"
+        );
+      }
+      logger.info("Writing multiple files", {
+        workspace: wsName,
+        repo_slug,
+        fileCount: files.length,
+        branch,
+        message,
+      });
+
+      const form = new FormData();
+      for (const file of files) {
+        form.append(file.path, new Blob([file.content]), file.path);
+      }
+      form.append("message", message);
+      form.append("branch", branch);
+      if (sourceCommit) {
+        form.append("parents", sourceCommit);
+      }
+
+      const response = await this.api.post(
+        `/repositories/${wsName}/${repo_slug}/src`,
+        form
+      );
+
+      const responseText = response.data
+        ? JSON.stringify(response.data, null, 2)
+        : `${files.length} file(s) committed to branch "${branch}" successfully.`;
+
+      return {
+        content: [{ type: "text", text: responseText }],
+      };
+    } catch (error) {
+      logger.error("Error writing files", {
+        error,
+        workspace,
+        repo_slug,
+        fileCount: files.length,
+        branch,
+      });
+      throw new McpError(
+        ErrorCode.InternalError,
+        `Failed to write files: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+  }
+
+  async deleteFile(
+    workspace: string,
+    repo_slug: string,
+    filePath: string,
+    message: string,
+    branch: string
+  ) {
+    try {
+      const wsName = workspace || this.config.defaultWorkspace;
+      if (!wsName) {
+        throw new McpError(
+          ErrorCode.InvalidParams,
+          "Workspace must be provided either as a parameter or through BITBUCKET_WORKSPACE environment variable"
+        );
+      }
+      logger.info("Deleting file", {
+        workspace: wsName,
+        repo_slug,
+        path: filePath,
+        branch,
+        message,
+      });
+
+      const form = new FormData();
+      form.append("files", filePath);
+      form.append("message", message);
+      form.append("branch", branch);
+
+      const response = await this.api.post(
+        `/repositories/${wsName}/${repo_slug}/src`,
+        form
+      );
+
+      const responseText = response.data
+        ? JSON.stringify(response.data, null, 2)
+        : `File "${filePath}" deleted from branch "${branch}" successfully.`;
+
+      return {
+        content: [{ type: "text", text: responseText }],
+      };
+    } catch (error) {
+      logger.error("Error deleting file", {
+        error,
+        workspace,
+        repo_slug,
+        path: filePath,
+        branch,
+      });
+      throw new McpError(
+        ErrorCode.InternalError,
+        `Failed to delete file: ${
           error instanceof Error ? error.message : String(error)
         }`
       );
