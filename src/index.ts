@@ -224,6 +224,70 @@ interface BitbucketSourceEntry {
 }
 
 /**
+ * Represents a Bitbucket commit
+ */
+interface BitbucketCommitDetail {
+  hash: string;
+  type: "commit";
+  date: string;
+  author: {
+    raw: string;
+    user?: BitbucketAccount;
+  };
+  message: string;
+  parents?: Array<{ hash: string; type: "commit" }>;
+  links: Record<string, BitbucketLink[]>;
+}
+
+/**
+ * Represents a diff stat entry for a file
+ */
+interface BitbucketDiffStatEntry {
+  status: "added" | "removed" | "modified" | "renamed";
+  old?: { path: string; type: string };
+  new?: { path: string; type: string };
+  lines_added: number;
+  lines_removed: number;
+}
+
+/**
+ * Represents a file history entry
+ */
+interface BitbucketFileHistoryEntry {
+  commit: BitbucketCommitDetail;
+  path: string;
+  type: "commit_file";
+  links: Record<string, BitbucketLink[]>;
+}
+
+/**
+ * Represents a commit comment
+ */
+interface BitbucketCommitComment {
+  id: number;
+  content: { raw: string; markup: string; html: string };
+  user: BitbucketAccount;
+  created_on: string;
+  updated_on: string;
+  links: Record<string, BitbucketLink[]>;
+}
+
+/**
+ * Represents a commit status (build status)
+ */
+interface BitbucketCommitStatus {
+  uuid: string;
+  key: string;
+  state: "SUCCESSFUL" | "FAILED" | "INPROGRESS" | "STOPPED";
+  name: string;
+  url: string;
+  description: string;
+  created_on: string;
+  updated_on: string;
+  links: Record<string, BitbucketLink[]>;
+}
+
+/**
  * Represents a hyperlink in Bitbucket API responses
  */
 interface BitbucketLink {
@@ -2244,6 +2308,191 @@ class BitbucketServer {
             required: ["repo_slug", "name"],
           },
         },
+        // ===== Commit & Diff Operations =====
+        {
+          name: "listCommits",
+          description:
+            "List commits for a repository, optionally filtered by branch/tag/revision",
+          inputSchema: {
+            type: "object",
+            properties: {
+              workspace: {
+                type: "string",
+                description: "Bitbucket workspace name",
+              },
+              repo_slug: { type: "string", description: "Repository slug" },
+              ref: {
+                type: "string",
+                description:
+                  "Branch name, tag, or commit hash (defaults to default branch)",
+              },
+              ...PAGINATION_BASE_SCHEMA,
+              all: PAGINATION_ALL_SCHEMA,
+            },
+            required: ["repo_slug"],
+          },
+        },
+        {
+          name: "getCommit",
+          description: "Get details for a specific commit",
+          inputSchema: {
+            type: "object",
+            properties: {
+              workspace: {
+                type: "string",
+                description: "Bitbucket workspace name",
+              },
+              repo_slug: { type: "string", description: "Repository slug" },
+              hash: { type: "string", description: "Commit hash" },
+            },
+            required: ["repo_slug", "hash"],
+          },
+        },
+        {
+          name: "getFileHistory",
+          description:
+            "Get the commit history for a specific file",
+          inputSchema: {
+            type: "object",
+            properties: {
+              workspace: {
+                type: "string",
+                description: "Bitbucket workspace name",
+              },
+              repo_slug: { type: "string", description: "Repository slug" },
+              ref: {
+                type: "string",
+                description:
+                  "Branch name, tag, or commit hash (defaults to default branch)",
+              },
+              path: {
+                type: "string",
+                description: "File path within the repository",
+              },
+              ...PAGINATION_BASE_SCHEMA,
+              all: PAGINATION_ALL_SCHEMA,
+            },
+            required: ["repo_slug", "path"],
+          },
+        },
+        {
+          name: "getDiff",
+          description:
+            "Get a diff between two refs (branches, tags, or commits)",
+          inputSchema: {
+            type: "object",
+            properties: {
+              workspace: {
+                type: "string",
+                description: "Bitbucket workspace name",
+              },
+              repo_slug: { type: "string", description: "Repository slug" },
+              spec: {
+                type: "string",
+                description:
+                  "Diff spec (e.g., 'branch1..branch2', 'commit1..commit2', or a single commit hash)",
+              },
+              context: {
+                type: "number",
+                description: "Number of context lines around changes",
+              },
+              path: {
+                type: "string",
+                description:
+                  "Optional file path to limit the diff to a specific file",
+              },
+            },
+            required: ["repo_slug", "spec"],
+          },
+        },
+        {
+          name: "getDiffStat",
+          description:
+            "Get diff statistics (files changed, lines added/removed) between two refs",
+          inputSchema: {
+            type: "object",
+            properties: {
+              workspace: {
+                type: "string",
+                description: "Bitbucket workspace name",
+              },
+              repo_slug: { type: "string", description: "Repository slug" },
+              spec: {
+                type: "string",
+                description:
+                  "Diff spec (e.g., 'branch1..branch2' or a single commit hash)",
+              },
+              ...PAGINATION_BASE_SCHEMA,
+              all: PAGINATION_ALL_SCHEMA,
+            },
+            required: ["repo_slug", "spec"],
+          },
+        },
+        {
+          name: "compareBranches",
+          description:
+            "Compare two branches and get the diff (convenience wrapper around getDiff)",
+          inputSchema: {
+            type: "object",
+            properties: {
+              workspace: {
+                type: "string",
+                description: "Bitbucket workspace name",
+              },
+              repo_slug: { type: "string", description: "Repository slug" },
+              source: {
+                type: "string",
+                description: "Source branch name",
+              },
+              destination: {
+                type: "string",
+                description: "Destination branch name",
+              },
+              context: {
+                type: "number",
+                description: "Number of context lines around changes",
+              },
+            },
+            required: ["repo_slug", "source", "destination"],
+          },
+        },
+        {
+          name: "listCommitComments",
+          description: "List comments on a specific commit",
+          inputSchema: {
+            type: "object",
+            properties: {
+              workspace: {
+                type: "string",
+                description: "Bitbucket workspace name",
+              },
+              repo_slug: { type: "string", description: "Repository slug" },
+              hash: { type: "string", description: "Commit hash" },
+              ...PAGINATION_BASE_SCHEMA,
+              all: PAGINATION_ALL_SCHEMA,
+            },
+            required: ["repo_slug", "hash"],
+          },
+        },
+        {
+          name: "getCommitStatuses",
+          description:
+            "List build statuses for a specific commit",
+          inputSchema: {
+            type: "object",
+            properties: {
+              workspace: {
+                type: "string",
+                description: "Bitbucket workspace name",
+              },
+              repo_slug: { type: "string", description: "Repository slug" },
+              hash: { type: "string", description: "Commit hash" },
+              ...PAGINATION_BASE_SCHEMA,
+              all: PAGINATION_ALL_SCHEMA,
+            },
+            required: ["repo_slug", "hash"],
+          },
+        },
       ].filter(
         (tool) =>
           this.config.allowDangerousCommands === true ||
@@ -2755,6 +3004,75 @@ class BitbucketServer {
               args.workspace as string,
               args.repo_slug as string,
               args.name as string
+            );
+          // ===== Commit & Diff Operations =====
+          case "listCommits":
+            return await this.listCommits(
+              args.workspace as string,
+              args.repo_slug as string,
+              args.ref as string,
+              args.pagelen as number,
+              args.page as number,
+              args.all as boolean
+            );
+          case "getCommit":
+            return await this.getCommit(
+              args.workspace as string,
+              args.repo_slug as string,
+              args.hash as string
+            );
+          case "getFileHistory":
+            return await this.getFileHistory(
+              args.workspace as string,
+              args.repo_slug as string,
+              args.ref as string,
+              args.path as string,
+              args.pagelen as number,
+              args.page as number,
+              args.all as boolean
+            );
+          case "getDiff":
+            return await this.getDiff(
+              args.workspace as string,
+              args.repo_slug as string,
+              args.spec as string,
+              args.context as number,
+              args.path as string
+            );
+          case "getDiffStat":
+            return await this.getDiffStat(
+              args.workspace as string,
+              args.repo_slug as string,
+              args.spec as string,
+              args.pagelen as number,
+              args.page as number,
+              args.all as boolean
+            );
+          case "compareBranches":
+            return await this.compareBranches(
+              args.workspace as string,
+              args.repo_slug as string,
+              args.source as string,
+              args.destination as string,
+              args.context as number
+            );
+          case "listCommitComments":
+            return await this.listCommitComments(
+              args.workspace as string,
+              args.repo_slug as string,
+              args.hash as string,
+              args.pagelen as number,
+              args.page as number,
+              args.all as boolean
+            );
+          case "getCommitStatuses":
+            return await this.getCommitStatuses(
+              args.workspace as string,
+              args.repo_slug as string,
+              args.hash as string,
+              args.pagelen as number,
+              args.page as number,
+              args.all as boolean
             );
           default:
             throw new McpError(
@@ -6020,6 +6338,403 @@ class BitbucketServer {
       throw new McpError(
         ErrorCode.InternalError,
         `Failed to delete tag: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+  }
+
+  // ===== Commit & Diff Operations =====
+
+  async listCommits(
+    workspace: string,
+    repo_slug: string,
+    ref?: string,
+    pagelen?: number,
+    page?: number,
+    all?: boolean
+  ) {
+    try {
+      const wsName = workspace || this.config.defaultWorkspace;
+      if (!wsName) {
+        throw new McpError(
+          ErrorCode.InvalidParams,
+          "Workspace must be provided either as a parameter or through BITBUCKET_WORKSPACE environment variable"
+        );
+      }
+      logger.info("Listing commits", {
+        workspace: wsName,
+        repo_slug,
+        ref,
+      });
+
+      const endpoint = ref
+        ? `/repositories/${wsName}/${repo_slug}/commits/${encodeURIComponent(ref)}`
+        : `/repositories/${wsName}/${repo_slug}/commits`;
+
+      const result = await this.paginator.fetchValues<BitbucketCommitDetail>(
+        endpoint,
+        { pagelen, page, all, description: "listCommits" }
+      );
+
+      return {
+        content: [
+          { type: "text", text: JSON.stringify(result.values, null, 2) },
+        ],
+      };
+    } catch (error) {
+      logger.error("Error listing commits", {
+        error,
+        workspace,
+        repo_slug,
+        ref,
+      });
+      throw new McpError(
+        ErrorCode.InternalError,
+        `Failed to list commits: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+  }
+
+  async getCommit(workspace: string, repo_slug: string, hash: string) {
+    try {
+      const wsName = workspace || this.config.defaultWorkspace;
+      if (!wsName) {
+        throw new McpError(
+          ErrorCode.InvalidParams,
+          "Workspace must be provided either as a parameter or through BITBUCKET_WORKSPACE environment variable"
+        );
+      }
+      logger.info("Getting commit", { workspace: wsName, repo_slug, hash });
+
+      const response = await this.api.get(
+        `/repositories/${wsName}/${repo_slug}/commit/${hash}`
+      );
+
+      return {
+        content: [
+          { type: "text", text: JSON.stringify(response.data, null, 2) },
+        ],
+      };
+    } catch (error) {
+      logger.error("Error getting commit", {
+        error,
+        workspace,
+        repo_slug,
+        hash,
+      });
+      throw new McpError(
+        ErrorCode.InternalError,
+        `Failed to get commit: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+  }
+
+  async getFileHistory(
+    workspace: string,
+    repo_slug: string,
+    ref?: string,
+    filePath?: string,
+    pagelen?: number,
+    page?: number,
+    all?: boolean
+  ) {
+    try {
+      const wsName = workspace || this.config.defaultWorkspace;
+      if (!wsName) {
+        throw new McpError(
+          ErrorCode.InvalidParams,
+          "Workspace must be provided either as a parameter or through BITBUCKET_WORKSPACE environment variable"
+        );
+      }
+      if (!filePath) {
+        throw new McpError(
+          ErrorCode.InvalidParams,
+          "File path is required"
+        );
+      }
+      const commitRef = ref || "HEAD";
+      logger.info("Getting file history", {
+        workspace: wsName,
+        repo_slug,
+        ref: commitRef,
+        path: filePath,
+      });
+
+      const result =
+        await this.paginator.fetchValues<BitbucketFileHistoryEntry>(
+          `/repositories/${wsName}/${repo_slug}/filehistory/${encodeURIComponent(commitRef)}/${filePath}`,
+          { pagelen, page, all, description: "getFileHistory" }
+        );
+
+      return {
+        content: [
+          { type: "text", text: JSON.stringify(result.values, null, 2) },
+        ],
+      };
+    } catch (error) {
+      logger.error("Error getting file history", {
+        error,
+        workspace,
+        repo_slug,
+        ref,
+        path: filePath,
+      });
+      throw new McpError(
+        ErrorCode.InternalError,
+        `Failed to get file history: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+  }
+
+  async getDiff(
+    workspace: string,
+    repo_slug: string,
+    spec: string,
+    context?: number,
+    filePath?: string
+  ) {
+    try {
+      const wsName = workspace || this.config.defaultWorkspace;
+      if (!wsName) {
+        throw new McpError(
+          ErrorCode.InvalidParams,
+          "Workspace must be provided either as a parameter or through BITBUCKET_WORKSPACE environment variable"
+        );
+      }
+      logger.info("Getting diff", {
+        workspace: wsName,
+        repo_slug,
+        spec,
+        context,
+        path: filePath,
+      });
+
+      const params: Record<string, string | number> = {};
+      if (context !== undefined) params.context = context;
+      if (filePath) params.path = filePath;
+
+      const response = await this.api.get(
+        `/repositories/${wsName}/${repo_slug}/diff/${spec}`,
+        {
+          params,
+          responseType: "text",
+          transformResponse: [(data: string) => data],
+        }
+      );
+
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              typeof response.data === "string"
+                ? response.data
+                : JSON.stringify(response.data, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      logger.error("Error getting diff", {
+        error,
+        workspace,
+        repo_slug,
+        spec,
+      });
+      throw new McpError(
+        ErrorCode.InternalError,
+        `Failed to get diff: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+  }
+
+  async getDiffStat(
+    workspace: string,
+    repo_slug: string,
+    spec: string,
+    pagelen?: number,
+    page?: number,
+    all?: boolean
+  ) {
+    try {
+      const wsName = workspace || this.config.defaultWorkspace;
+      if (!wsName) {
+        throw new McpError(
+          ErrorCode.InvalidParams,
+          "Workspace must be provided either as a parameter or through BITBUCKET_WORKSPACE environment variable"
+        );
+      }
+      logger.info("Getting diff stat", {
+        workspace: wsName,
+        repo_slug,
+        spec,
+      });
+
+      const result = await this.paginator.fetchValues<BitbucketDiffStatEntry>(
+        `/repositories/${wsName}/${repo_slug}/diffstat/${spec}`,
+        { pagelen, page, all, description: "getDiffStat" }
+      );
+
+      return {
+        content: [
+          { type: "text", text: JSON.stringify(result.values, null, 2) },
+        ],
+      };
+    } catch (error) {
+      logger.error("Error getting diff stat", {
+        error,
+        workspace,
+        repo_slug,
+        spec,
+      });
+      throw new McpError(
+        ErrorCode.InternalError,
+        `Failed to get diff stat: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+  }
+
+  async compareBranches(
+    workspace: string,
+    repo_slug: string,
+    source: string,
+    destination: string,
+    context?: number
+  ) {
+    try {
+      const wsName = workspace || this.config.defaultWorkspace;
+      if (!wsName) {
+        throw new McpError(
+          ErrorCode.InvalidParams,
+          "Workspace must be provided either as a parameter or through BITBUCKET_WORKSPACE environment variable"
+        );
+      }
+      logger.info("Comparing branches", {
+        workspace: wsName,
+        repo_slug,
+        source,
+        destination,
+      });
+
+      const spec = `${source}..${destination}`;
+      return await this.getDiff(wsName, repo_slug, spec, context);
+    } catch (error) {
+      logger.error("Error comparing branches", {
+        error,
+        workspace,
+        repo_slug,
+        source,
+        destination,
+      });
+      throw new McpError(
+        ErrorCode.InternalError,
+        `Failed to compare branches: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+  }
+
+  async listCommitComments(
+    workspace: string,
+    repo_slug: string,
+    hash: string,
+    pagelen?: number,
+    page?: number,
+    all?: boolean
+  ) {
+    try {
+      const wsName = workspace || this.config.defaultWorkspace;
+      if (!wsName) {
+        throw new McpError(
+          ErrorCode.InvalidParams,
+          "Workspace must be provided either as a parameter or through BITBUCKET_WORKSPACE environment variable"
+        );
+      }
+      logger.info("Listing commit comments", {
+        workspace: wsName,
+        repo_slug,
+        hash,
+      });
+
+      const result = await this.paginator.fetchValues<BitbucketCommitComment>(
+        `/repositories/${wsName}/${repo_slug}/commit/${hash}/comments`,
+        { pagelen, page, all, description: "listCommitComments" }
+      );
+
+      return {
+        content: [
+          { type: "text", text: JSON.stringify(result.values, null, 2) },
+        ],
+      };
+    } catch (error) {
+      logger.error("Error listing commit comments", {
+        error,
+        workspace,
+        repo_slug,
+        hash,
+      });
+      throw new McpError(
+        ErrorCode.InternalError,
+        `Failed to list commit comments: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+  }
+
+  async getCommitStatuses(
+    workspace: string,
+    repo_slug: string,
+    hash: string,
+    pagelen?: number,
+    page?: number,
+    all?: boolean
+  ) {
+    try {
+      const wsName = workspace || this.config.defaultWorkspace;
+      if (!wsName) {
+        throw new McpError(
+          ErrorCode.InvalidParams,
+          "Workspace must be provided either as a parameter or through BITBUCKET_WORKSPACE environment variable"
+        );
+      }
+      logger.info("Getting commit statuses", {
+        workspace: wsName,
+        repo_slug,
+        hash,
+      });
+
+      const result = await this.paginator.fetchValues<BitbucketCommitStatus>(
+        `/repositories/${wsName}/${repo_slug}/commit/${hash}/statuses`,
+        { pagelen, page, all, description: "getCommitStatuses" }
+      );
+
+      return {
+        content: [
+          { type: "text", text: JSON.stringify(result.values, null, 2) },
+        ],
+      };
+    } catch (error) {
+      logger.error("Error getting commit statuses", {
+        error,
+        workspace,
+        repo_slug,
+        hash,
+      });
+      throw new McpError(
+        ErrorCode.InternalError,
+        `Failed to get commit statuses: ${
           error instanceof Error ? error.message : String(error)
         }`
       );
