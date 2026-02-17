@@ -6937,6 +6937,13 @@ class BitbucketServer {
         const mcpServer = this.createMcpServer();
         await mcpServer.connect(transport);
         await transport.handleRequest(req, res, req.body);
+      } else if (req.method === "GET") {
+        // GET without session = client trying to open SSE notification channel
+        // before a session exists. Return 405 per MCP Streamable HTTP spec
+        // so the client knows GET SSE is not supported.
+        res.status(405).set("Allow", "POST, DELETE").json({
+          error: "Method Not Allowed: SSE notifications not supported",
+        });
       } else {
         res.status(400).json({ error: "Bad Request: No valid session" });
       }
